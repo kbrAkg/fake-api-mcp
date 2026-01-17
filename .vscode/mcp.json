@@ -2,7 +2,8 @@
   "servers": {
     "fake-api": {
       "type": "http",
-      "url": "http://localhost:3000/mcp"
+      "url": "https://apim-ai-gw-demo-01.azure-api.net/fake-api-mcp/mcp"
+      //"url": "http://localhost:3000/mcp"
     }
   }
 }

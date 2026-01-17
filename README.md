@@ -7,7 +7,7 @@ MCP (Model Context Protocol) Server for [FakeRESTApi](https://fakerestapi.azurew
 - **Streamable HTTP Transport** - Modern MCP transport with session management
 - **Dynamic Tool Generation** - Tools are generated at runtime from Swagger/OpenAPI specification
 - **MCP Error Handling** - Proper error responses using `McpError`
-- **Azure App Service Ready** - Configured for deployment to Azure
+- **Azure Container Apps Ready** - Containerized deployment with auto-scaling support
 
 ## Tools
 
@@ -96,35 +96,85 @@ Add to your MCP client configuration:
 
 ## Azure Deployment
 
-### Prerequisites
-- Azure CLI installed
-- Azure subscription
+### 🏆 Önerilen: Azure Container Apps
 
-### Deploy
+MCP Server için en uygun deployment seçeneği **Azure Container Apps**'tir:
+
+- ✅ Scale to zero (kullanılmadığında maliyet yok)
+- ✅ WebSocket/SSE desteği (MCP için kritik)
+- ✅ Otomatik ölçeklendirme
+
+### 1. ACR'a Image Push
 
 ```bash
-# Login to Azure
+# Azure'a giriş yap
 az login
 
-# Create resource group
-az group create --name fake-api-mcp-rg --location westeurope
+# ACR'a giriş yap
+az acr login --name <acr-name>
 
-# Create App Service plan
-az appservice plan create --name fake-api-mcp-plan --resource-group fake-api-mcp-rg --sku B1 --is-linux
+# Image'ı build et ve push et
+cd deploy
+.\acr-build.ps1 -AcrName "<acr-name>" -ImageTag "latest"
+```
 
-# Create Web App
-az webapp create --resource-group fake-api-mcp-rg --plan fake-api-mcp-plan --name fake-api-mcp --runtime "NODE:24-lts"
+### 2. Container App Oluşturma (Manuel)
 
-# Configure startup command
-az webapp config set --resource-group fake-api-mcp-rg --name fake-api-mcp --startup-file "npm start"
+```bash
+# Resource Group oluştur (yoksa)
+az group create --name mcp-server-rg --location westeurope
 
-# Deploy from local folder
-az webapp deploy --resource-group fake-api-mcp-rg --name fake-api-mcp --src-path . --type zip
+# Container Apps Environment oluştur
+az containerapp env create \
+    --name mcp-server-env \
+    --resource-group mcp-server-rg \
+    --location westeurope
+
+# Container App oluştur
+az containerapp create \
+    --name mcp-server \
+    --resource-group mcp-server-rg \
+    --environment mcp-server-env \
+    --image <acr-name>.azurecr.io/fake-api-mcp:latest \
+    --target-port 3000 \
+    --ingress external \
+    --min-replicas 0 \
+    --max-replicas 10 \
+    --cpu 0.5 \
+    --memory 1.0Gi
+
+# ACR'a erişim için identity ekle
+az containerapp registry set \
+    --name mcp-server \
+    --resource-group mcp-server-rg \
+    --server <acr-name>.azurecr.io \
+    --identity system
+```
+
+### Detaylı Kurulum
+
+Detaylı kurulum adımları için [deploy/README.md](deploy/README.md) dosyasına bakın.
+
+### Mimari
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Azure Container Apps                        │
+│                   (MCP Server - Node.js)                    │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│              FakeRESTApi (External API)                     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Environment Variables
 
-The server uses `process.env.PORT` which is automatically set by Azure App Service.
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | Server port | 3000 |
+| `NODE_ENV` | Environment | production |
 
 ## License
 
