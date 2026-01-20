@@ -1,0 +1,116 @@
+name: Deploy to Azure Container Apps
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+env:
+  AZURE_RESOURCE_GROUP: rg-fake-api-mcp
+  AZURE_LOCATION: westeurope
+  ACR_NAME: acrfakeapimcp
+  CONTAINER_APP_NAME: ca-fake-api-mcp
+  IMAGE_NAME: fake-api-mcp
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set environment based on branch
+        id: set-env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "ENVIRONMENT=prod" >> $GITHUB_OUTPUT
+            echo "MIN_REPLICAS=2" >> $GITHUB_OUTPUT
+            echo "MAX_REPLICAS=10" >> $GITHUB_OUTPUT
+          else
+            echo "ENVIRONMENT=dev" >> $GITHUB_OUTPUT
+            echo "MIN_REPLICAS=1" >> $GITHUB_OUTPUT
+            echo "MAX_REPLICAS=3" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set up Azure CLI
+        run: |
+          az config set extension.use_dynamic_install=yes_without_prompt
+          az extension add --name containerapp --upgrade
+
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${IMAGE_TAG} .
+          docker tag ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${IMAGE_TAG} ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${IMAGE_TAG}
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+
+      - name: Deploy Bicep template
+        run: |
+          az deployment group create \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --template-file ./azure-deployment/main.bicep \
+            --parameters \
+              appName=${{ env.IMAGE_NAME }} \
+              location=${{ env.AZURE_LOCATION }} \
+              environment=${{ steps.set-env.outputs.ENVIRONMENT }} \
+              imageTag=${{ env.IMAGE_TAG }} \
+              minReplicas=${{ steps.set-env.outputs.MIN_REPLICAS }} \
+              maxReplicas=${{ steps.set-env.outputs.MAX_REPLICAS }}
+
+      - name: Get Container App URL
+        id: get-url
+        run: |
+          FQDN=$(az containerapp show \
+            --name ${{ env.CONTAINER_APP_NAME }}-${{ steps.set-env.outputs.ENVIRONMENT }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --query properties.configuration.ingress.fqdn \
+            -o tsv)
+          echo "APP_URL=https://${FQDN}" >> $GITHUB_OUTPUT
+          echo "### Deployment Successful! 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "Application URL: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: ${{ steps.set-env.outputs.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
+          echo "Image Tag: ${{ env.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Health check
+        run: |
+          echo "Waiting for application to be ready..."
+          sleep 30
+          curl -f ${{ steps.get-url.outputs.APP_URL }}/health || exit 1
+          echo "Health check passed!"
+
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ steps.get-url.outputs.APP_URL }}/health)
+          if [ $STATUS -eq 200 ]; then
+            echo "✅ Smoke tests passed"
+          else
+            echo "❌ Smoke tests failed with status code: $STATUS"
+            exit 1
+          fi
+
+      - name: Deployment summary
+        run: |
+          echo "==================================="
+          echo "Deployment Summary"
+          echo "==================================="
+          echo "Environment: ${{ steps.set-env.outputs.ENVIRONMENT }}"
+          echo "Resource Group: ${{ env.AZURE_RESOURCE_GROUP }}"
+          echo "Container App: ${{ env.CONTAINER_APP_NAME }}-${{ steps.set-env.outputs.ENVIRONMENT }}"
+          echo "Image: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          echo "URL: ${{ steps.get-url.outputs.APP_URL }}"
+          echo "==================================="

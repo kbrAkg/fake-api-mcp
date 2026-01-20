@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "appName": {
+      "value": "fake-api-mcp"
+    },
+    "location": {
+      "value": "westeurope"
+    },
+    "environment": {
+      "value": "prod"
+    },
+    "imageTag": {
+      "value": "latest"
+    },
+    "minReplicas": {
+      "value": 2
+    },
+    "maxReplicas": {
+      "value": 10
+    },
+    "cpuCores": {
+      "value": "1.0"
+    },
+    "memorySize": {
+      "value": "2.0Gi"
+    },
+    "enableApplicationInsights": {
+      "value": true
+    }
+  }
+}

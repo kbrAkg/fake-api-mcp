@@ -1,0 +1,173 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  azureSubscription: 'Azure-Service-Connection' # Update with your service connection name
+  resourceGroupName: 'rg-fake-api-mcp'
+  location: 'westeurope'
+  acrName: 'acrfakeapimcp'
+  containerAppName: 'ca-fake-api-mcp'
+  imageName: 'fake-api-mcp'
+
+stages:
+  - stage: Build
+    displayName: 'Build Docker Image'
+    jobs:
+      - job: BuildJob
+        displayName: 'Build and Push to ACR'
+        steps:
+          - task: Docker@2
+            displayName: 'Login to ACR'
+            inputs:
+              command: 'login'
+              containerRegistry: '$(acrName)'
+
+          - task: Docker@2
+            displayName: 'Build Docker Image'
+            inputs:
+              command: 'build'
+              repository: '$(imageName)'
+              dockerfile: 'Dockerfile'
+              tags: |
+                $(Build.BuildId)
+                latest
+
+          - task: Docker@2
+            displayName: 'Push Docker Image to ACR'
+            inputs:
+              command: 'push'
+              repository: '$(imageName)'
+              tags: |
+                $(Build.BuildId)
+                latest
+
+          - publish: '$(System.DefaultWorkingDirectory)/azure-deployment'
+            artifact: 'bicep-templates'
+            displayName: 'Publish Bicep Templates'
+
+  - stage: DeployDev
+    displayName: 'Deploy to Development'
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - deployment: DeployDevJob
+        displayName: 'Deploy to Dev Environment'
+        environment: 'Development'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: 'bicep-templates'
+
+                - task: AzureCLI@2
+                  displayName: 'Deploy Bicep Template'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      az deployment group create \
+                        --resource-group $(resourceGroupName) \
+                        --template-file $(Pipeline.Workspace)/bicep-templates/main.bicep \
+                        --parameters \
+                          appName=$(imageName) \
+                          location=$(location) \
+                          environment=dev \
+                          imageTag=$(Build.BuildId) \
+                          minReplicas=1 \
+                          maxReplicas=3
+
+                - task: AzureCLI@2
+                  displayName: 'Get Application URL'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      APP_URL=$(az containerapp show \
+                        --name $(containerAppName)-dev \
+                        --resource-group $(resourceGroupName) \
+                        --query properties.configuration.ingress.fqdn \
+                        -o tsv)
+                      echo "Application URL: https://${APP_URL}"
+                      echo "##vso[task.setvariable variable=AppUrl]https://${APP_URL}"
+
+                - script: |
+                    echo "Waiting for application to be ready..."
+                    sleep 30
+                    curl -f $(AppUrl)/health || exit 1
+                  displayName: 'Health Check'
+
+  - stage: DeployProd
+    displayName: 'Deploy to Production'
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployProdJob
+        displayName: 'Deploy to Prod Environment'
+        environment: 'Production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: 'bicep-templates'
+
+                - task: AzureCLI@2
+                  displayName: 'Deploy Bicep Template'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      az deployment group create \
+                        --resource-group $(resourceGroupName) \
+                        --template-file $(Pipeline.Workspace)/bicep-templates/main.bicep \
+                        --parameters \
+                          appName=$(imageName) \
+                          location=$(location) \
+                          environment=prod \
+                          imageTag=$(Build.BuildId) \
+                          minReplicas=2 \
+                          maxReplicas=10 \
+                          cpuCores=1.0 \
+                          memorySize=2.0Gi
+
+                - task: AzureCLI@2
+                  displayName: 'Get Application URL'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      APP_URL=$(az containerapp show \
+                        --name $(containerAppName)-prod \
+                        --resource-group $(resourceGroupName) \
+                        --query properties.configuration.ingress.fqdn \
+                        -o tsv)
+                      echo "Application URL: https://${APP_URL}"
+                      echo "##vso[task.setvariable variable=AppUrl]https://${APP_URL}"
+
+                - script: |
+                    echo "Waiting for application to be ready..."
+                    sleep 30
+                    curl -f $(AppUrl)/health || exit 1
+                  displayName: 'Health Check'
+
+                - script: |
+                    echo "Running smoke tests..."
+                    STATUS=$(curl -s -o /dev/null -w "%{http_code}" $(AppUrl)/health)
+                    if [ $STATUS -eq 200 ]; then
+                      echo "✅ Smoke tests passed"
+                    else
+                      echo "❌ Smoke tests failed"
+                      exit 1
+                    fi
+                  displayName: 'Smoke Tests'
